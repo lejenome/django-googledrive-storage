@@ -395,7 +395,7 @@ class GoogleDriveStorage(Storage):
         if file_data is None:
             return None
         else:
-            return file_data["alternateLink"]
+            return file_data["webContentLink"]
 
     def accessed_time(self, name):
         """
