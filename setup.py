@@ -9,12 +9,14 @@ long_description = codecs.open('README.rst', "r").read()
 
 INSTALL_REQUIRES = [
     "google-api-python-client >= 1.5.1",
+    "google-auth-httplib2",
+    "google-auth-oauthlib",
+    "google-auth",
+
     "python-dateutil >= 2.5.3",
     "requests >= 2.10.0",
     "django-appconf >= 1.0.2",
-    "oauth2client >= 2.2.0",
-    "six >= 1.10.0"
-    ""
+    "six >= 1.10.0",
 ]
 
 EXTRAS_REQUIRE = dict()

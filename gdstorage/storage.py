@@ -3,18 +3,20 @@ from __future__ import unicode_literals
 import mimetypes
 import os.path
 from io import BytesIO
+from functools import partial
 
 import django
 import enum
 import httplib2
 import six
-from apiclient.discovery import build
-from apiclient.http import MediaIoBaseUpload
+from googleapiclient.discovery import build
+from googleapiclient.http import MediaIoBaseUpload
 from dateutil.parser import parse
 from django.conf import settings
 from django.core.files import File
 from django.core.files.storage import Storage
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2 import service_account
+from django.core.cache import caches
 
 
 DJANGO_VERSION = django.VERSION[:2]
@@ -81,7 +83,7 @@ class GoogleDriveFilePermission(object):
 
         :param gdstorage.GoogleDrivePermissionRole g_role: Role associated to this permission
         :param gdstorage.GoogleDrivePermissionType g_type: Type associated to this permission
-        :param str g_value: email address that qualifies the User associated to this permission
+        :param str g_email: email address that qualifies the User associated to this permission
 
     """
 
@@ -106,13 +108,13 @@ class GoogleDriveFilePermission(object):
         return self._type
 
     @property
-    def value(self):
+    def email(self):
         """
             Email that qualifies the user associated to this permission
             :return: Email as string
             :rtype: str
         """
-        return self._value
+        return self._email
 
     @property
     def raw(self):
@@ -129,12 +131,12 @@ class GoogleDriveFilePermission(object):
             "type": self.type.value
         }
 
-        if self.value is not None:
-            result["value"] = self.value
+        if self.email is not None:
+            result["emailAddress"] = self.email
 
         return result
 
-    def __init__(self, g_role, g_type, g_value=None):
+    def __init__(self, g_role, g_type, g_email=None):
         """
             Instantiate this class
         """
@@ -142,12 +144,12 @@ class GoogleDriveFilePermission(object):
             raise ValueError("Role should be a GoogleDrivePermissionRole instance")
         if not isinstance(g_type, GoogleDrivePermissionType):
             raise ValueError("Permission should be a GoogleDrivePermissionType instance")
-        if g_value is not None and not isinstance(g_value, six.string_types):
-            raise ValueError("Value should be a String instance")
+        if g_email is not None and not isinstance(g_email, six.string_types):
+            raise ValueError("emailAddress should be a String instance")
 
         self._role = g_role
         self._type = g_type
-        self._value = g_value
+        self._email = g_email
 
 
 _ANYONE_CAN_READ_PERMISSION_ = GoogleDriveFilePermission(
@@ -168,21 +170,24 @@ class GoogleDriveStorage(Storage):
     _GOOGLE_DRIVE_FOLDER_MIMETYPE_ = "application/vnd.google-apps.folder"
 
     def __init__(self, json_keyfile_path=None,
-                 permissions=None):
+                 permissions=None, cache=None):
         """
         Handles credentials and builds the google service.
 
-        :param _json_keyfile_path: Path
-        :param user_email: String
+        :param json_keyfile_path: Path
+        :param permissions: list
+        :param cache: name of the cache backend to use for API requests. Set to None to disable caching
         :raise ValueError:
         """
         self._json_keyfile_path = json_keyfile_path or settings.GOOGLE_DRIVE_STORAGE_JSON_KEY_FILE
 
-        credentials = ServiceAccountCredentials.from_json_keyfile_name(self._json_keyfile_path,
-                                                                       scopes=["https://www.googleapis.com/auth/drive"])
+        credentials = service_account.Credentials.from_service_account_file(
+            self._json_keyfile_path,
+            scopes=["https://www.googleapis.com/auth/drive"]
+        )
 
-        http = httplib2.Http()
-        http = credentials.authorize(http)
+        # http = httplib2.Http(cache=".cache")
+        # http = credentials.authorize(http)
 
         self._permissions = None
         if permissions is None:
@@ -198,7 +203,17 @@ class GoogleDriveStorage(Storage):
                 # Ok, permissions are good
                 self._permissions = permissions
 
-        self._drive_service = build('drive', 'v2', http=http)
+        self._drive_service = build('drive', 'v3',
+                                    # http=http,
+                                    credentials=credentials)
+
+        if cache:
+            self._cache = caches[cache]
+        else:
+            self._cache = False
+
+        # cache of folders Id. format {(title, parent_id): folder_id}
+        self._foldersId = {}
 
     def _split_path(self, p):
         """
@@ -236,7 +251,7 @@ class GoogleDriveStorage(Storage):
                 current_folder_data = None
 
             meta_data = {
-                'title': split_path[-1],
+                'name': split_path[-1],
                 'mimeType': self._GOOGLE_DRIVE_FOLDER_MIMETYPE_
             }
             if current_folder_data is not None:
@@ -246,10 +261,29 @@ class GoogleDriveStorage(Storage):
                 # obtained by the user, if available
                 if parent_id is not None:
                     meta_data['parents'] = [{'id': parent_id}]
-            current_folder_data = self._drive_service.files().insert(body=meta_data).execute()
-            return current_folder_data    
+            current_folder_data = self._drive_service.files().create(body=meta_data).execute()
+            return current_folder_data
         else:
             return folder_data
+
+    def _get_file(self, filename):
+        """
+        Get the file with specific parameters from Google Drive.
+
+        :param filename: File or folder to search
+        :type filename: string
+        :param use_cache: Use Django cache backend to store response for next requests
+        :type use_cache: bool
+        :returns: dict containing file / folder data if exists or None if does not exists
+        """
+        if not self._cache:
+            return self._check_file_exists(filename)
+        else:
+            return self._cache.get_or_set(
+                'gdstorage::' + filename,
+                partial(self._check_file_exists, filename),
+                timeout=24 * 60 * 60
+            )
 
     def _check_file_exists(self, filename, parent_id=None):
         """
@@ -265,45 +299,54 @@ class GoogleDriveStorage(Storage):
         """
         split_filename = self._split_path(filename)
         if len(split_filename) > 1:
-            # This is an absolute path with folder inside
-            # First check if the first element exists as a folder
-            # If so call the method recursively with next portion of path
-            # Otherwise the path does not exists hence the file does not exists
-            q = "mimeType = '{0}' and title = '{1}'".format(self._GOOGLE_DRIVE_FOLDER_MIMETYPE_,
-                                                            split_filename[0])
-            if parent_id is not None:
-                q = "{0} and '{1}' in parents".format(q, parent_id)
-            max_results = 1000  # Max value admitted from google drive
-            folders = self._drive_service.files().list(q=q, maxResults=max_results).execute()
-            for folder in folders["items"]:
-                if folder["title"] == split_filename[0]:
-                    # Assuming every folder has a single parent
-                    return self._check_file_exists(os.path.sep.join(split_filename[1:]), folder["id"])
-            return None
+            folder_id = self._foldersId.get((filename, parent_id), None)
+
+            if folder_id is None:
+                # This is an absolute path with folder inside
+                # First check if the first element exists as a folder
+                # If so call the method recursively with next portion of path
+                # Otherwise the path does not exists hence the file does not exists
+                q = "mimeType = '{0}' and name = '{1}'".format(self._GOOGLE_DRIVE_FOLDER_MIMETYPE_,
+                                                                split_filename[0])
+                if parent_id is not None:
+                    q = "{0} and '{1}' in parents".format(q, parent_id)
+                max_results = 1000  # Max value admitted from google drive
+                folders = self._drive_service.files().list(q=q, pageSize=max_results, fields="files(name,id)").execute()
+                for folder in folders["files"]:
+                    if folder["name"] == split_filename[0]:
+                        # Assuming every folder has a single parent
+                        folder_id = folder["id"]
+                        self._foldersId[(filename, parent_id)] = folder_id
+                        break
+            if folder_id is not None:
+                return self._check_file_exists(os.path.sep.join(split_filename[1:]), folder_id)
+            else:
+                return None
         else:
             # This is a file, checking if exists
-            q = "title = '{0}'".format(split_filename[0])
+            q = "name = '{0}'".format(split_filename[0])
             if parent_id is not None:
                 q = "{0} and '{1}' in parents".format(q, parent_id)
             max_results = 1000  # Max value admitted from google drive
-            file_list = self._drive_service.files().list(q=q, maxResults=max_results).execute()
-            if len(file_list["items"]) == 0:
+            file_list = self._drive_service.files().list(q=q, pageSize=max_results, fields="files(id,name,originalFilename,webContentLink,size,createdTime,modifiedTime)").execute()
+            if len(file_list["files"]) == 0:
                 q = "" if parent_id is None else "'{0}' in parents".format(parent_id)
-                file_list = self._drive_service.files().list(q=q, maxResults=max_results).execute()
-                for element in file_list["items"]:
-                    if split_filename[0] in element["title"]:
+                file_list = self._drive_service.files().list(q=q, pageSize=max_results, fields="files(id,name,originalFilename,webContentLink,size,createdTime,modifiedTime)").execute()
+                for element in file_list["files"]:
+                    if split_filename[0] in element["name"]:
                         return element
                 return None
             else:
-                return file_list["items"][0]
+                return file_list["files"][0]
 
     # Methods that had to be implemented
     # to create a valid storage for Django
 
     def _open(self, name, mode='rb'):
-        file_data = self._check_file_exists(name)
+        file_data = self._get_file(name)
         response, content = self._drive_service._http.request(
-            file_data['downloadUrl'])
+            # file_data['downloadUrl'])
+            file_data['webContentLink'])
 
         return File(BytesIO(content), name)
 
@@ -313,32 +356,33 @@ class GoogleDriveStorage(Storage):
         parent_id = None if folder_data is None else folder_data['id']
         # Now we had created (or obtained) folder on GDrive
         # Upload the file
-        mime_type = mimetypes.guess_type(name)
-        if mime_type[0] is None:
+        mime_type, encoding = mimetypes.guess_type(name)
+        if mime_type is None:
             mime_type = self._UNKNOWN_MIMETYPE_
-        media_body = MediaIoBaseUpload(content.file, mime_type, resumable=True, chunksize=1024*512)
+        media_body = MediaIoBaseUpload(content.file, mime_type, resumable=True, chunksize=1024*1024*5)
+        filename = os.path.basename(name)
         body = {
-            'title': name,
+            'name': filename,
             'mimeType': mime_type
         }
         # Set the parent folder.
         if parent_id:
-            body['parents'] = [{'id': parent_id}]
-        file_data = self._drive_service.files().insert(
+            body['parents'] = [parent_id]
+        file_data = self._drive_service.files().create(
             body=body,
             media_body=media_body).execute()
 
         # Setting up permissions
         for p in self._permissions:
-            self._drive_service.permissions().insert(fileId=file_data["id"], body=p.raw).execute()
+            self._drive_service.permissions().create(fileId=file_data["id"], body=p.raw).execute()
 
-        return file_data.get(u'originalFilename', file_data.get(u'title'))
+        return file_data.get(u'originalFilename', file_data.get('name'))
 
     def delete(self, name):
         """
         Deletes the specified file from the storage system.
         """
-        file_data = self._check_file_exists(name)
+        file_data = self._get_file(name)
         if file_data is not None:
             self._drive_service.files().delete(fileId=file_data['id']).execute()
 
@@ -347,7 +391,7 @@ class GoogleDriveStorage(Storage):
         Returns True if a file referenced by the given name already exists in the
         storage system, or False if the name is available for a new file.
         """
-        return self._check_file_exists(name) is not None
+        return self._get_file(name) is not None
 
     def listdir(self, path):
         """
@@ -358,40 +402,42 @@ class GoogleDriveStorage(Storage):
         if path == "/":
             folder_id = {"id": "root"}
         else:
-            folder_id = self._check_file_exists(path)
+            folder_id = self._get_file(path)
         if folder_id:
             file_params = {
                 'q': "'{0}' in parents and mimeType != '{1}'".format(folder_id["id"],
                                                                      self._GOOGLE_DRIVE_FOLDER_MIMETYPE_),
+                'fields': "files(name)",
             }
             dir_params = {
                 'q': "'{0}' in parents and mimeType = '{1}'".format(folder_id["id"],
                                                                     self._GOOGLE_DRIVE_FOLDER_MIMETYPE_),
+                'fields': "files(name)",
             }
             files_list = self._drive_service.files().list(**file_params).execute()
             dir_list = self._drive_service.files().list(**dir_params).execute()
-            for element in files_list["items"]:
-                files.append(os.path.join(path, element["title"]))
-            for element in dir_list["items"]:
-                directories.append(os.path.join(path, element["title"]))
+            for element in files_list["files"]:
+                files.append(os.path.join(path, element["name"]))
+            for element in dir_list["files"]:
+                directories.append(os.path.join(path, element["name"]))
         return directories, files
 
     def size(self, name):
         """
         Returns the total size, in bytes, of the file specified by name.
         """
-        file_data = self._check_file_exists(name)
+        file_data = self._get_file(name)
         if file_data is None:
             return 0
         else:
-            return file_data["fileSize"]
+            return file_data["size"]
 
     def url(self, name):
         """
         Returns an absolute URL where the file's contents can be accessed
         directly by a Web browser.
         """
-        file_data = self._check_file_exists(name)
+        file_data = self._get_file(name)
         if file_data is None:
             return None
         else:
@@ -409,22 +455,22 @@ class GoogleDriveStorage(Storage):
         Returns the creation time (as datetime object) of the file
         specified by name.
         """
-        file_data = self._check_file_exists(name)
+        file_data = self._get_file(name)
         if file_data is None:
             return None
         else:
-            return parse(file_data['createdDate'])
+            return parse(file_data['createdTime'])
 
     def modified_time(self, name):
         """
         Returns the last modified time (as datetime object) of the file
         specified by name.
         """
-        file_data = self._check_file_exists(name)
+        file_data = self._get_file(name)
         if file_data is None:
             return None
         else:
-            return parse(file_data["modifiedDate"])
+            return parse(file_data["modifiedTime"])
 
 
 if DJANGO_VERSION >= (1, 7):

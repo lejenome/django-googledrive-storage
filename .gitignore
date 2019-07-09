@@ -18,3 +18,5 @@ build
 docs/test
 docs/out
 .ropeproject
+test/huge_file
+test/gdstorage.json

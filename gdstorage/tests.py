@@ -13,9 +13,9 @@ from gdstorage.storage import GoogleDriveStorage, GoogleDrivePermissionType, Goo
 class GoogleDriveStorageTest(TestCase):
     def test_check_root_file_exists(self):
         gds = GoogleDriveStorage()
-        file_data = gds._check_file_exists("How to get started with Drive")
+        file_data = gds._check_file_exists("Getting started")
         pprint(file_data)
-        self.assertIsNotNone(file_data, "Unable to find file 'How to get started with Drive'")
+        self.assertIsNotNone(file_data, "Unable to find file 'Getting started'")
         time.sleep(10)
 
     def test_check_or_create_folder(self):
@@ -33,7 +33,7 @@ class GoogleDriveStorageTest(TestCase):
         pprint(result)
         self.assertIsNotNone(result, u'Unable to upload file to Google Drive')
 
-    def _test_list_folder(self):
+    def test_list_folder(self):
         self._test_upload_file()
         gds = GoogleDriveStorage()
         (directories, files) = gds.listdir("/test4")
@@ -42,7 +42,7 @@ class GoogleDriveStorageTest(TestCase):
         self.assertTrue(len(files) > 0, "Unable to read directory data")
 
     def _test_open_file(self):
-        self._test_list_folder()
+        self._test_upload_file()
         gds = GoogleDriveStorage()
         f = gds.open(u'/test4/gdrive_logo.png', "rb")
         pprint(f)
@@ -83,7 +83,7 @@ class GoogleDriveStorageTest(TestCase):
         time.sleep(10)
 
     def test_upload_big_file(self):
-        gds = GoogleDriveStorage()
+        gds = GoogleDriveStorage(cache="default")
         file_name = "{0}{1}{2}".format(os.path.dirname(os.path.abspath(__file__)), os.path.sep,
                                        "../test/huge_file")
         with open(file_name, "wb") as out:
@@ -97,12 +97,9 @@ class GoogleDriveStorageTest(TestCase):
 
         time.sleep(10)
 
-    def test_open_big_file(self):
-        self._test_list_folder()
         gds = GoogleDriveStorage()
         f = gds.open(u'/test5/huge_file', "rb")
         pprint(f)
         pprint(len(f))
         self.assertIsNotNone(f, "Unable to load data from Google Drive")
         time.sleep(10)
-
