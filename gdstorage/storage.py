@@ -203,14 +203,16 @@ class GoogleDriveStorage(Storage):
                 # Ok, permissions are good
                 self._permissions = permissions
 
-        self._drive_service = build('drive', 'v3',
-                                    # http=http,
-                                    credentials=credentials)
-
         if cache:
             self._cache = caches[cache]
         else:
-            self._cache = False
+            self._cache = None
+
+        self._drive_service = build('drive', 'v3',
+                                    # http=http,
+                                    cache_discovery=self._cache is not None,
+                                    cache=self._cache,
+                                    credentials=credentials)
 
         # cache of folders Id. format {(title, parent_id): folder_id}
         self._foldersId = {}
