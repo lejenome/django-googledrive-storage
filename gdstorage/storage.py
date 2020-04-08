@@ -181,7 +181,7 @@ class GoogleDriveStorage(Storage):
         """
         self._json_keyfile_path = json_keyfile_path or settings.GOOGLE_DRIVE_STORAGE_JSON_KEY_FILE
 
-        credentials = service_account.Credentials.from_service_account_file(
+        self.credentials = service_account.Credentials.from_service_account_file(
             self._json_keyfile_path,
             scopes=["https://www.googleapis.com/auth/drive"]
         )
@@ -208,14 +208,18 @@ class GoogleDriveStorage(Storage):
         else:
             self._cache = None
 
-        self._drive_service = build('drive', 'v3',
-                                    # http=http,
-                                    cache_discovery=self._cache is not None,
-                                    cache=self._cache,
-                                    credentials=credentials)
-
         # cache of folders Id. format {(title, parent_id): folder_id}
         self._foldersId = {}
+
+    @property
+    def _drive_service(self):
+        if not hasattr(self, '__drive_service'):
+            self.__drive_service = build('drive', 'v3',
+                                         # http=http,
+                                         cache_discovery=self._cache is not None,
+                                         cache=self._cache,
+                                         credentials=self.credentials)
+        return self.__drive_service
 
     def _split_path(self, p):
         """
