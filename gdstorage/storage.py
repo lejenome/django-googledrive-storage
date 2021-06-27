@@ -181,9 +181,9 @@ class GoogleDriveStorage(Storage):
         :param cache: name of the cache backend to use for API requests. Set to None to disable caching
         :raise ValueError:
         """
-        json_keyfile_path = json_keyfile_path or settings.get('GOOGLE_DRIVE_STORAGE_JSON_KEY_FILE', None)
+        json_keyfile_path = json_keyfile_path or getattr(settings, 'GOOGLE_DRIVE_STORAGE_JSON_KEY_FILE', None)
 
-        if not service_account_info and settings.get('GOOGLE_DRIVE_STORAGE_SERVICE_ACCOUNT_INFO', None):
+        if not service_account_info and getattr(settings, 'GOOGLE_DRIVE_STORAGE_SERVICE_ACCOUNT_INFO', None):
             service_account_info = settings.GOOGLE_DRIVE_STORAGE_SERVICE_ACCOUNT_INFO
         elif not service_account_info and json_keyfile_path:
             service_account_info = json.load(open(json_keyfile_path))
