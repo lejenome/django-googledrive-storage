@@ -9,6 +9,7 @@ import django
 import enum
 import httplib2
 import six
+import json
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseUpload
 from dateutil.parser import parse
@@ -169,20 +170,27 @@ class GoogleDriveStorage(Storage):
     _UNKNOWN_MIMETYPE_ = "application/octet-stream"
     _GOOGLE_DRIVE_FOLDER_MIMETYPE_ = "application/vnd.google-apps.folder"
 
-    def __init__(self, json_keyfile_path=None,
+    def __init__(self, json_keyfile_path=None, service_account_info=None,
                  permissions=None, cache=None):
         """
         Handles credentials and builds the google service.
 
         :param json_keyfile_path: Path
+        :param service_account_info: dict
         :param permissions: list
         :param cache: name of the cache backend to use for API requests. Set to None to disable caching
         :raise ValueError:
         """
-        self._json_keyfile_path = json_keyfile_path or settings.GOOGLE_DRIVE_STORAGE_JSON_KEY_FILE
+        json_keyfile_path = json_keyfile_path or settings.get('GOOGLE_DRIVE_STORAGE_JSON_KEY_FILE', None)
 
-        self.credentials = service_account.Credentials.from_service_account_file(
-            self._json_keyfile_path,
+        if not service_account_info and settings.get('GOOGLE_DRIVE_STORAGE_SERVICE_ACCOUNT_INFO', None):
+            service_account_info = settings.GOOGLE_DRIVE_STORAGE_SERVICE_ACCOUNT_INFO
+        elif not service_account_info and json_keyfile_path:
+            service_account_info = json.load(open(json_keyfile_path))
+
+        self.service_account_info = service_account_info
+        self.credentials = service_account.Credentials.from_service_account_info(
+            service_account_info,
             scopes=["https://www.googleapis.com/auth/drive"]
         )
 
@@ -494,8 +502,8 @@ if DJANGO_VERSION >= (1, 7):
                 super(GoogleDriveStorage, self).deconstruct()
             if self._service_email is not None:
                 kwargs["service_email"] = self._service_email
-            if self._json_keyfile_path is not None:
-                kwargs["json_keyfile_path"] = self._json_keyfile_path
+            if self.service_account_info is not None:
+                kwargs["service_account_info"] = self.service_account_info
 
     @deconstructible
     class GoogleDriveFilePermission(GoogleDriveFilePermission):
